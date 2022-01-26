@@ -1958,6 +1958,180 @@ VALUES
 
 ### 3.4 秒杀功能实现
 
+> 点击秒杀按钮需要判断：
+>
+> 1. 库存是否为0
+> 2. 此用户是否已经抢购过一次
+>
+> 若可以秒杀，则：
+>
+> 1. 生成订单
+> 2. 生成秒杀订单
+
+- SecKillController
+
+  - ```java
+    package com.liuyj.secondkill.controller;
+    
+    import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+    import com.liuyj.secondkill.pojo.Order;
+    import com.liuyj.secondkill.pojo.SeckillOrder;
+    import com.liuyj.secondkill.pojo.User;
+    import com.liuyj.secondkill.service.IGoodsService;
+    import com.liuyj.secondkill.service.IOrderService;
+    import com.liuyj.secondkill.service.ISeckillOrderService;
+    import com.liuyj.secondkill.vo.GoodsVo;
+    import com.liuyj.secondkill.vo.ResponseBeanEnum;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.stereotype.Controller;
+    import org.springframework.ui.Model;
+    import org.springframework.web.bind.annotation.RequestMapping;
+    
+    import java.nio.IntBuffer;
+    
+    /**
+     * @author LYJ
+     * @create 2022-01-24 9:25
+     * 秒杀功能实现
+     */
+    
+    @Controller
+    @RequestMapping("/seckill")
+    public class SecKillController {
+    
+        @Autowired
+        private IGoodsService goodsService;
+        @Autowired
+        private ISeckillOrderService secKillOrderService;
+        @Autowired
+        private IOrderService orderService;
+    
+        /*简化：跳转到订单页面*/
+        @RequestMapping("doSeckill")
+        public String doSeckill(Model model, User user,
+                                Long goodsId) {
+            if (user == null) {
+                return "login";
+            }
+            model.addAttribute("user", user);
+            /**
+             * 这里再次查看商品的库存原因在于前端页面上的库存数量很容易通过F12被修改
+             * */
+            GoodsVo goodsVo = goodsService.findGoodsVoById(goodsId);
+            if (goodsVo.getStockCount() < 1) {
+                model.addAttribute("errmsg",
+                        ResponseBeanEnum.EMPTY_STOCK.getMessage());
+                return "secKillFail";
+            }
+    
+            /*查看是否重复抢购*/
+            SeckillOrder seckillOrder = secKillOrderService.getOne(new QueryWrapper<SeckillOrder>()
+                    .eq("user_id", user.getId())
+                    .eq("goods_id", goodsVo.getId()));
+            if (seckillOrder != null) {
+                model.addAttribute("errmsg", ResponseBeanEnum.REPEATE_ERROR.getMessage());
+                return "secKillFail";
+            }
+            Order order = orderService.secKill(user, goodsVo);
+            model.addAttribute("order", order);
+            model.addAttribute("goods", goodsVo);
+            return "orderDetail";
+        }
+    }
+    ```
+
+- OrderServiceImpl
+
+  - ```java
+    package com.liuyj.secondkill.service.impl;
+    
+    import com.baomidou.mybatisplus.core.conditions.Wrapper;
+    import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+    import com.liuyj.secondkill.pojo.Order;
+    import com.liuyj.secondkill.mapper.OrderMapper;
+    import com.liuyj.secondkill.pojo.SeckillGoods;
+    import com.liuyj.secondkill.pojo.SeckillOrder;
+    import com.liuyj.secondkill.pojo.User;
+    import com.liuyj.secondkill.service.IOrderService;
+    import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+    import com.liuyj.secondkill.service.ISeckillGoodsService;
+    import com.liuyj.secondkill.service.ISeckillOrderService;
+    import com.liuyj.secondkill.vo.GoodsVo;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.stereotype.Service;
+    import org.springframework.ui.Model;
+    
+    import java.util.Date;
+    
+    /**
+     * <p>
+     *  服务实现类
+     * </p>
+     *
+     * @author LiuYunJie
+     * @since 2022-01-23
+     */
+    @Service
+    public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements IOrderService {
+    
+        @Autowired
+        private ISeckillGoodsService seckillGoodsService;
+        @Autowired
+        private OrderMapper orderMapper;
+        @Autowired
+        private ISeckillOrderService seckillOrderService;
+    
+        /*秒杀功能*/
+        @Override
+        public Order secKill(User user, GoodsVo goodsVo) {
+            // 秒杀商品表减库存
+            SeckillGoods seckillGoods = seckillGoodsService.getOne(new QueryWrapper<SeckillGoods>().
+                    eq("goods_id", goodsVo.getId()));
+            seckillGoods.setStockCount(seckillGoods.getStockCount() - 1);
+            seckillGoodsService.updateById(seckillGoods);
+    
+            /*生成订单*/
+            Order order = new Order();
+            order.setUserId(user.getId());
+            order.setGoodsId(goodsVo.getId());
+            order.setDeliveryAddrId(0L);
+            order.setGoodsName(goodsVo.getGoodsName());
+            order.setGoodsCount(1);
+            order.setGoodsPrice(goodsVo.getSeckillPrice());
+            order.setOrderChannel(1);
+            order.setStatus(0);
+            order.setCreateDate(new Date());
+    //        order.setPayDate();
+            orderMapper.insert(order);
+    
+            /*生成秒杀订单*/
+            SeckillOrder seckillOrder = new SeckillOrder();
+            seckillOrder.setUserId(user.getId());
+            seckillOrder.setOrderId(order.getId());
+            seckillOrder.setGoodsId(goodsVo.getId());
+            seckillOrderService.save(seckillOrder);
+            return order;
+        }
+    }
+    ```
+
+## 4. 系统压测
+
+> 工具：JMeter
+>
+> 官网：https://jmeter.apache.org/
+
+### 4.1 JMeter检测使用
+
+- 配置：
+  - ![image-20220124160611657](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160611657.png)
+  - ![](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160611657.png)
+  - ![image-20220124160654754](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160654754.png)
+- 结果：
+  - ![image-20220124160714731](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160714731.png)
+  - ![image-20220124160729521](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160729521.png)
+  - ![image-20220124160739892](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160739892.png)
+
 
 
 
