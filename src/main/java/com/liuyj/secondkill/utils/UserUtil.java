@@ -1,6 +1,8 @@
 package com.liuyj.secondkill.utils;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.liuyj.secondkill.pojo.User;
+import com.liuyj.secondkill.vo.ResponseBean;
 
 import java.io.*;
 import java.net.HttpURLConnection;
@@ -66,7 +68,8 @@ public class UserUtil {
             co.setRequestMethod("POST");
             co.setDoOutput(true);
             OutputStream out = co.getOutputStream();
-            String params = "mobile=" + user.getId() + "&password=" + MD5Util.inputPassToFromPass("123456");
+            String params = "mobile=" + user.getId() +
+                    "&password=" + MD5Util.fromPasswordToDBPassword("123456", "1a2b3c4d");
             out.write(params.getBytes());
             out.flush();
             InputStream inputStream = co.getInputStream();
@@ -80,8 +83,8 @@ public class UserUtil {
             bout.close();
             String response = new String(bout.toByteArray());
             ObjectMapper mapper = new ObjectMapper();
-            RespBean respBean = mapper.readValue(response, RespBean.class);
-            String userTicket = ((String) respBean.getObj());
+            ResponseBean respBean = mapper.readValue(response, ResponseBean.class);
+            String userTicket = ((String) respBean.getObject());
             System.out.println("create userTicket : " + user.getId());
 
             String row = user.getId() + "," + userTicket;
@@ -96,9 +99,9 @@ public class UserUtil {
     }
 
     private static Connection getConn() throws Exception {
-        String url = "jdbc:mysql://localhost:3306/seckill?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai";
+        String url = "jdbc:mysql://localhost:3306/secondkill?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai";
         String username = "root";
-        String password = "1234";
+        String password = "7012+2";
         String driver = "com.mysql.cj.jdbc.Driver";
         Class.forName(driver);
         return DriverManager.getConnection(url, username, password);

@@ -2115,7 +2115,7 @@ VALUES
     }
     ```
 
-## 4. 系统压测
+## 4. 优化
 
 > 工具：JMeter
 >
@@ -2133,6 +2133,423 @@ VALUES
   - ![image-20220124160739892](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220124160739892.png)
 
 
+
+### 4.2 页面优化 ###
+
+#### 4.2.1 页面缓存 ####
+
+> 将页面缓存到 Redis 中，这样打开页面的时候不需要每次都渲染页面(耗费资源)
+
+- 商品列表页面渲染
+
+  - ```java
+    /**
+     * @author LYJ
+     * @create 2022-01-20 19:53
+     * 判断用户是否正确登录
+     *      若正确登录，则跳到商品页面
+     *      否则，回到登陆页面
+     */
+    
+    @Controller
+    @RequestMapping("/goods")
+    public class GoodsController {
+    
+        @Autowired
+        private UserServiceImpl userService;
+        @Autowired
+        private IGoodsService goodsService;
+        @Autowired
+        private RedisTemplate redisTemplate;
+        @Autowired
+        private ThymeleafViewResolver thymeleafViewResolver;
+    
+        /*
+        * 跳转到商品页面
+        * */
+        @RequestMapping(value = "/toList", produces = "text/html;charset=utf-8")
+        @ResponseBody
+        public String toList(Model model, User user, HttpServletRequest request,
+                             HttpServletResponse response) {
+            /*从Redis获取页面，如果不为空，直接返回页面*/
+            ValueOperations valueOperations = redisTemplate.opsForValue();
+            String html = (String) valueOperations.get("goodsList");
+            if (!StringUtils.isEmpty(html)){
+                return html;
+            }
+    
+            model.addAttribute("user", user);
+            model.addAttribute("goodsList", goodsService.findGoodsVo());
+    //        return "goodsList";
+    
+            /*若页面是空，则手动渲染页面，并将其存入Redis返回*/
+            WebContext context = new WebContext(request, response, request.getServletContext(), request.getLocale(),
+                    model.asMap());
+            html = thymeleafViewResolver.getTemplateEngine().process("goodsList", context);
+            if (!StringUtils.isEmpty(html)) {
+                valueOperations.set("goodsList", html, 60, TimeUnit.SECONDS);
+            }
+            return html;
+        }
+    }
+    ```
+
+  - ![image-20220126212203940](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220126212203940.png)
+
+#### 4.2.2 URL 缓存
+
+> 页面带有参数的情况，其实跟页面缓存一样
+
+- 商品详情页面缓存
+
+  - ```java
+        /*
+         *  功能描述: 跳转商品详情页
+         * */
+        @RequestMapping(value = "/toDetail/{goodsId}", produces = "text/html;charset=utf-8")
+        @ResponseBody
+        public String toDetail(Model model, User user, @PathVariable Long goodsId,
+                               HttpServletRequest request, HttpServletResponse response) {
+            ValueOperations valueOperations = redisTemplate.opsForValue();
+            /*Redis中获取页面，如果不为空，直接返回页面*/
+            String html = (String) valueOperations.get("goodsDetail" + goodsId);
+            if (!StringUtils.isEmpty(html)) {
+                return html;
+            }
+    
+            model.addAttribute("user", user);
+            GoodsVo goodsVo = goodsService.findGoodsVoById(goodsId);
+            Date startDate = goodsVo.getStartDate();
+            Date endDate = goodsVo.getEndDate();
+            Date nowDate = new Date();
+            /*秒杀状态*/
+            int secKillStatus = 0;
+            /*秒杀倒计时*/
+            int remainSeconds = 0;
+    
+            if (nowDate.before(startDate)) {
+                /*秒杀还未开始*/
+                remainSeconds = ((int) (nowDate.getTime() - startDate.getTime())) / 1000;
+            } else if (nowDate.after(endDate)) {
+                /*秒杀已经结束*/
+                secKillStatus = 2;
+                remainSeconds = -1;
+            } else {
+                /*秒杀进行中*/
+                secKillStatus = 1;
+                remainSeconds = 0;
+            }
+    
+            model.addAttribute("secKillStatus", secKillStatus);
+            model.addAttribute("remainSeconds", remainSeconds);
+            model.addAttribute("goods", goodsVo);
+    
+            /*Redis中获取页面，如果为空，thymeleaf渲染页面并且存放到Redis中*/
+            WebContext context = new WebContext(request, response, request.getServletContext(), request.getLocale(),
+                    model.asMap());
+            html = thymeleafViewResolver.getTemplateEngine().process("goodsDetail", context);
+            if (!StringUtils.isEmpty(html)) {
+                valueOperations.set("goodsDetail" + goodsId, html, 60, TimeUnit.SECONDS);
+            }
+            return html;
+    //        return "goodsDetail";
+        }
+    ```
+
+- > 注意：
+  >
+  > ![image-20220128204625023](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220128204625023.png)
+
+
+
+### 4.3 对象缓存
+
+> 其实没咋听明白，但是感觉登录成功往 Redis 中存 User 对象的时候算是一个。
+>
+> ​	下面的改动：User信息改变的时候修改Redis中的缓存，例如更新密码。
+>
+> 最简单的思路：对数据库进行操作的时候清空Redis中的缓存。
+
+- 在 IUserService.java 文件中添加一个 updatePassword 接口
+
+  - ```java
+        /**
+         * 更新密码
+         * */
+        ResponseBean updatePassword(String userTicket, String password,
+                                    HttpServletRequest request,
+                                    HttpServletResponse response);
+    ```
+
+- 在 UserServiceImpl.java 中实现该方法
+
+  - ```java
+    /**
+         * 更新密码
+         * */
+        @Override
+        public ResponseBean updatePassword(String userTicket, String password,
+                                           HttpServletRequest request,
+                                           HttpServletResponse response) {
+            User user = getUserByCookie(userTicket, request, response);
+            if (user == null) {
+                throw new GlobalException(ResponseBeanEnum.MOBILE_NOT_EXIST);
+            }
+            user.setPassword(MD5Util.fromPasswordToDBPassword(password, user.getSalt()));
+            int i = userMapper.updateById(user);
+            if (i == 1) {
+                /*删除Redis*/
+                redisTemplate.delete("user:" + userTicket);
+                return ResponseBean.success();
+            }
+    
+            return ResponseBean.error(ResponseBeanEnum.PASSWORD_UPDATE_FAIL);
+        }
+    ```
+
+### 4.4 页面静态化
+
+> 现在的缓存是缓存整个 HTML 页面，其中有大量不需要变更的东西，缓存这些也是需要耗费资源的。其实只需要把 HTML 中会存在变化的对象、数据缓存下来即可，也就是俗称的 **前后端分离**。
+>
+>   这里没有使用 Vue 新建页面实现，只是单纯使用 Ajax 实现做一个简单的例子。
+
+#### 4.4.1 商品详情页面静态化
+
+![image-20220130191024402](https://gitee.com/yun-xiaojie/blog-image/raw/master/img/image-20220130191024402.png)
+
+- 分析这个页面，可以看到变化的东西只有四个：User对象、商品详情DetailsVo、秒杀状态、秒杀倒计时间。可以新建一个类保存这些信息。
+
+  - ```java
+    package com.liuyj.secondkill.vo;
+    
+    import com.liuyj.secondkill.pojo.User;
+    import lombok.AllArgsConstructor;
+    import lombok.Data;
+    import lombok.NoArgsConstructor;
+    
+    /**
+     * 详情返回对象
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public class DetailsVo {
+    
+        private User user;
+    
+        private GoodsVo goodsVo;
+    
+        private int secKillStatus;
+    
+        private int remainSeconds;
+    
+    }
+    ```
+
+- 修改对应的 Controller 类：
+
+  - GoodsController.java
+
+  - ```java
+    /**
+         * 功能描述: 跳转商品详情页
+         *
+         * @param:
+         * @return:
+         * 乐字节：专注线上IT培训
+         * 答疑老师微信：lezijie
+         * @since: 1.0.0
+         * @Author:zhoubin
+         */
+        @RequestMapping("/detail/{goodsId}")
+        @ResponseBody
+        public ResponseBean toDetail(User user, @PathVariable Long goodsId) {
+            GoodsVo goodsVo = goodsService.findGoodsVoById(goodsId);
+            Date startDate = goodsVo.getStartDate();
+            Date endDate = goodsVo.getEndDate();
+            Date nowDate = new Date();
+            //秒杀状态
+            int secKillStatus = 0;
+            //秒杀倒计时
+            int remainSeconds = 0;
+            //秒杀还未开始
+            if (nowDate.before(startDate)) {
+                remainSeconds = ((int) ((startDate.getTime() - nowDate.getTime()) / 1000));
+            } else if (nowDate.after(endDate)) {
+                //	秒杀已结束
+                secKillStatus = 2;
+                remainSeconds = -1;
+            } else {
+                //秒杀中
+                secKillStatus = 1;
+                remainSeconds = 0;
+            }
+            DetailsVo detailVo = new DetailsVo();
+            detailVo.setUser(user);
+            detailVo.setGoodsVo(goodsVo);
+            detailVo.setSecKillStatus(secKillStatus);
+            detailVo.setRemainSeconds(remainSeconds);
+            return ResponseBean.success(detailVo);
+        }
+    ```
+
+- 修改对应的前端页面
+
+  - GoodsDetail.htm
+
+  - ```html
+    <!DOCTYPE html>
+    <html lang="en"
+          xmlns:th="http://www.thymeleaf.org">
+    <head>
+        <meta charset="UTF-8">
+        <title>商品详情</title>
+        <!-- jquery -->
+        <script type="text/javascript" src="/js/jquery.min.js"></script>
+        <!-- bootstrap -->
+        <link rel="stylesheet" type="text/css"
+              href="/bootstrap/css/bootstrap.min.css"/>
+        <script type="text/javascript" src="/bootstrap/js/bootstrap.min.js">
+        </script>
+        <!-- layer -->
+        <script type="text/javascript" src="/layer/layer.js"></script>
+        <!-- common.js -->
+        <script type="text/javascript" src="/js/common.js"></script>
+    </head>
+    <body>
+    <div class="panel panel-default">
+        <div class="panel-heading">秒杀商品详情</div>
+        <div class="panel-body">
+            <span id="userTip"> 您还没有登录，请登陆后再操作<br/></span>
+            <span>没有收货地址的提示。。。</span>
+        </div>
+        <table class="table" id="goods">
+            <tr>
+                <td>商品名称</td>
+                <td colspan="3" id="goodsName"></td>
+            </tr>
+            <tr>
+                <td>商品图片</td>
+                <td colspan="3"><img id="goodsImg" width="200" height="200"/></td>
+            </tr>
+            <tr>
+                <td>秒杀开始时间</td>
+                <td id="startTime"></td>
+                <td>
+                    <input type="hidden" id="remainSeconds"/>
+                    <!-- <span if="secKillStatus eq 0">秒杀倒计时：<span
+                    id="countDown"
+                    text="remainSeconds">
+                    </span>秒</span>
+                    <span if="secKillStatus eq 1">秒杀进行中</span>
+                    <span if="secKillStatus eq 2">秒杀已结束</span>-->
+                    <span id="seckillTip"></span>
+                </td>
+                <td>
+                    <form id="seckillForm" method="post"
+                          action="/seckill/doSeckill">
+                        <button class="btn btn-primary btn-block" type="submit"
+                                id="buyButton">立即秒杀
+                        </button>
+                        <input type="hidden" name="goodsId" id="goodsId"/>
+                    </form>
+                </td>
+            </tr>
+            <tr>
+                <td>商品原价</td>
+                <td colspan="3" id="goodsPrice"></td>
+            </tr>
+            <tr>
+                <td>秒杀价</td>
+                <td colspan="3" id="seckillPrice"></td>
+            </tr>
+            <tr>
+                <td>库存数量</td>
+                <td colspan="3" id="stockCount"></td>
+            </tr>
+        </table>
+    </div>
+    </body>
+    <script>
+        $(function () {
+                // countDown();
+                getDetails();
+            }
+        );
+    
+        function getDetails() {
+            var goodsId = g_getQueryString("goodsId");
+            $.ajax({
+                url: "/goods/detail/" + goodsId,
+                type: "GET",
+                success: function (data) {
+                    if (data.code == 200) {
+                        render(data.obj);
+                    } else {
+                        layer.msg(data.message);
+                    }
+                },
+                error: function () {
+                    layer.msg("客户端请求错误");
+                }
+            })
+        }
+    
+        function render(detail) {
+            var user = detail.user;
+            var goods = detail.goodsVo;
+            var remainSeconds = detail.remainSeconds;
+            if (user) {
+                $("#userTip").hide();
+            }
+            $("#goodsName").text(goods.goodsName);
+            $("#goodsImg").attr("src", goods.goodsImg);
+            $("#startTime").text(new Date(goods.startDate).format("yyyy-MM-dd HH:mm:ss"));
+            $("#remainSeconds").val(remainSeconds);
+            $("#goodsId").val(goods.id);
+            $("#goodsPrice").text(goods.goodsPrice);
+            $("#seckillPrice").text(goods.seckillPrice);
+            $("#stockCount").text(goods.stockCount);
+            countDown();
+        }
+    
+        $(function () {
+            countDown();
+        });
+    
+        function countDown() {
+            var remainSeconds = $("#remainSeconds").val();
+            var timeout;
+            //秒杀还没开始，倒计时
+            if (remainSeconds > 0) {
+                $("#buyButton").attr("disabled", true);
+                $("#seckillTip").html("秒杀倒计时：" + remainSeconds + "秒");
+                timeout = setTimeout(function () {
+                        // $("#countDown").text(remainSeconds - 1);
+                        $("#remainSeconds").val(remainSeconds - 1);
+                        countDown();
+                    },
+                    1000
+                );
+            }
+            //秒杀进行中
+            else if (remainSeconds == 0) {
+                $("#buyButton").attr("disabled", false);
+                if (timeout) {
+                    clearTimeout(timeout);
+                }
+                $("#seckillTip").html("秒杀进行中");
+                //秒杀已经结束
+            } else {
+                $("#buyButton").attr("disabled", true);
+                $("#seckillTip").html("秒杀已经结束");
+            }
+        }
+    </script>
+    </html>
+    ```
+
+#### 4.4.2 秒杀静态化
 
 
 

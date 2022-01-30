@@ -86,4 +86,26 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         return user;
     }
+
+    /**
+     * 更新密码
+     * */
+    @Override
+    public ResponseBean updatePassword(String userTicket, String password,
+                                       HttpServletRequest request,
+                                       HttpServletResponse response) {
+        User user = getUserByCookie(userTicket, request, response);
+        if (user == null) {
+            throw new GlobalException(ResponseBeanEnum.MOBILE_NOT_EXIST);
+        }
+        user.setPassword(MD5Util.fromPasswordToDBPassword(password, user.getSalt()));
+        int i = userMapper.updateById(user);
+        if (i == 1) {
+            /*删除Redis*/
+            redisTemplate.delete("user:" + userTicket);
+            return ResponseBean.success();
+        }
+
+        return ResponseBean.error(ResponseBeanEnum.PASSWORD_UPDATE_FAIL);
+    }
 }
